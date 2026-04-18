@@ -141,7 +141,32 @@ To install Pushover Notification for Claude Desktop automatically via [Smithery]
 npx -y @smithery/cli install @AshikNesin/pushover-mcp --client claude
 ```
 
-## Development
+## Mojo Native Binary
+
+This repository now includes a Mojo implementation of the MCP server at:
+
+- `mojo/pushover_mcp.mojo`
+
+Build a native binary with Mojo:
+
+```bash
+mojo build mojo/pushover_mcp.mojo -o dist/pushover-mcp
+```
+
+Run it:
+
+```bash
+dist/pushover-mcp --token YOUR_TOKEN --user YOUR_USER
+```
+
+Runtime requirements for the Mojo server path:
+
+- `curl` (for calling the Pushover API)
+- `jq` (for MCP JSON handling)
+
+You can then reference that binary directly in your MCP client configuration.
+
+## TypeScript Development
 
 ```bash
 # Install dependencies
