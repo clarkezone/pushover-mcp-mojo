@@ -1,6 +1,31 @@
 from python import Python
 
 
+fn send_response(json_mod, sys_mod, request_id, result) raises:
+    let payload = {
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "result": result,
+    }
+    sys_mod.stdout.write(json_mod.dumps(payload) + "\n")
+    sys_mod.stdout.flush()
+
+
+fn send_error(json_mod, sys_mod, request_id, code, message, data = None) raises:
+    let payload = {
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "error": {
+            "code": code,
+            "message": message,
+        },
+    }
+    if data is not None:
+        payload["error"]["data"] = data
+    sys_mod.stdout.write(json_mod.dumps(payload) + "\n")
+    sys_mod.stdout.flush()
+
+
 fn main() raises:
     let argparse = Python.import_module("argparse")
     let json = Python.import_module("json")
@@ -38,32 +63,9 @@ fn main() raises:
         },
     }
 
-    fn send_response(json_mod, sys_mod, request_id, result) raises:
-        let payload = {
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "result": result,
-        }
-        sys_mod.stdout.write(json_mod.dumps(payload) + "\n")
-        sys_mod.stdout.flush()
-
-    fn send_error(json_mod, sys_mod, request_id, code, message, data = None) raises:
-        let payload = {
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "error": {
-                "code": code,
-                "message": message,
-            },
-        }
-        if data is not None:
-            payload["error"]["data"] = data
-        sys_mod.stdout.write(json_mod.dumps(payload) + "\n")
-        sys_mod.stdout.flush()
-
     while True:
         let line = sys.stdin.readline()
-        if line is None or line == "":
+        if line == "":
             break
 
         let stripped = line.strip()
@@ -134,8 +136,8 @@ fn main() raises:
                 )
                 continue
 
-            let message = arguments.get("message")
-            if message is None or str(message).strip() == "":
+            let message_value = arguments.get("message")
+            if message_value is None:
                 send_error(
                     json,
                     sys,
@@ -145,8 +147,34 @@ fn main() raises:
                     "message is required",
                 )
                 continue
+            let message = str(message_value).strip()
+            if message == "":
+                send_error(
+                    json,
+                    sys,
+                    request_id,
+                    -32602,
+                    "Invalid params",
+                    "message cannot be empty",
+                )
+                continue
 
-            let priority = arguments.get("priority")
+            let priority = None
+            let priority_input = arguments.get("priority")
+            if priority_input is not None:
+                try:
+                    priority = int(priority_input)
+                except Exception:
+                    send_error(
+                        json,
+                        sys,
+                        request_id,
+                        -32602,
+                        "Invalid params",
+                        "priority must be a number between -2 and 2",
+                    )
+                    continue
+
             if priority is not None:
                 if priority < -2 or priority > 2:
                     send_error(
@@ -162,13 +190,15 @@ fn main() raises:
             let payload = {
                 "token": token,
                 "user": user,
-                "message": str(message),
+                "message": message,
             }
 
-            for field_name in ["title", "priority", "sound", "url", "url_title", "device"]:
+            for field_name in ["title", "sound", "url", "url_title", "device"]:
                 let value = arguments.get(field_name)
                 if value is not None:
                     payload[field_name] = str(value)
+            if priority is not None:
+                payload["priority"] = priority
 
             let encoded = urllib_parse.urlencode(payload).encode("utf-8")
             let http_request = urllib_request.Request(
@@ -180,7 +210,18 @@ fn main() raises:
 
             try:
                 let response = urllib_request.urlopen(http_request)
-                _ = response.read().decode("utf-8")
+                let response_body = response.read().decode("utf-8")
+                let response_json = json.loads(response_body)
+                if response_json.get("status") != 1:
+                    send_error(
+                        json,
+                        sys,
+                        request_id,
+                        -32000,
+                        "Pushover API error",
+                        response_body,
+                    )
+                    continue
                 send_response(
                     json,
                     sys,
