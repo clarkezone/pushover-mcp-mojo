@@ -159,6 +159,11 @@ Run it:
 dist/pushover-mcp --token YOUR_TOKEN --user YOUR_USER
 ```
 
+Runtime requirements for the Mojo server path:
+
+- `curl` (for calling the Pushover API)
+- `jq` (for MCP JSON handling)
+
 You can then reference that binary directly in your MCP client configuration.
 
 ## TypeScript Development

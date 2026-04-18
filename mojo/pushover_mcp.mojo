@@ -1,109 +1,138 @@
-from python import Python
+from std.io import input, print
+from std.subprocess import run
+from std.sys import argv, stderr
 
 
-fn send_response(json_mod, sys_mod, request_id, result) raises:
-    let payload = {
-        "jsonrpc": "2.0",
-        "id": request_id,
-        "result": result,
-    }
-    sys_mod.stdout.write(json_mod.dumps(payload) + "\n")
-    sys_mod.stdout.flush()
+fn shell_quote(value: String) -> String:
+    return "'" + value.replace("'", "'\"'\"'") + "'"
 
 
-fn send_error(json_mod, sys_mod, request_id, code, message, data = None) raises:
-    let payload = {
-        "jsonrpc": "2.0",
-        "id": request_id,
-        "error": {
-            "code": code,
-            "message": message,
-        },
-    }
-    if data is not None:
-        payload["error"]["data"] = data
-    sys_mod.stdout.write(json_mod.dumps(payload) + "\n")
-    sys_mod.stdout.flush()
+fn run_jq_raw(input_json: String, filter: String) raises -> String:
+    let cmd = (
+        "printf %s "
+        + shell_quote(input_json)
+        + " | jq -r "
+        + shell_quote(filter)
+        + " 2>/dev/null"
+    )
+    return run(cmd).strip()
+
+
+fn run_jq_compact(input_json: String, filter: String) raises -> String:
+    let cmd = (
+        "printf %s "
+        + shell_quote(input_json)
+        + " | jq -c "
+        + shell_quote(filter)
+        + " 2>/dev/null"
+    )
+    return run(cmd).strip()
+
+
+fn emit_json(payload: String):
+    print(payload, flush=True)
+
+
+fn send_response(request_id_json: String, result_json: String) raises:
+    let cmd = (
+        "jq -cn --argjson id "
+        + shell_quote(request_id_json)
+        + " --argjson result "
+        + shell_quote(result_json)
+        + " '{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":$result}'"
+    )
+    emit_json(run(cmd).strip())
+
+
+fn send_error(
+    request_id_json: String,
+    code: Int,
+    message: String,
+    data: String = "",
+) raises:
+    var cmd = (
+        "jq -cn --argjson id "
+        + shell_quote(request_id_json)
+        + " --arg code "
+        + shell_quote(String(code))
+        + " --arg message "
+        + shell_quote(message)
+    )
+    if data != "":
+        cmd += (
+            " --arg data "
+            + shell_quote(data)
+            + " '{\"jsonrpc\":\"2.0\",\"id\":$id,\"error\":{\"code\":($code|tonumber),\"message\":$message,\"data\":$data}}'"
+        )
+    else:
+        cmd += " '{\"jsonrpc\":\"2.0\",\"id\":$id,\"error\":{\"code\":($code|tonumber),\"message\":$message}}'"
+    emit_json(run(cmd).strip())
+
+
+fn parse_cli_args() -> (String, String):
+    let args = argv()
+    var token = ""
+    var user = ""
+
+    var i = 1
+    while i < len(args):
+        let arg = String(args[i])
+        if arg == "--token" and i + 1 < len(args):
+            token = String(args[i + 1])
+            i += 2
+            continue
+        if arg == "--user" and i + 1 < len(args):
+            user = String(args[i + 1])
+            i += 2
+            continue
+        i += 1
+
+    return (token, user)
 
 
 fn main() raises:
-    let argparse = Python.import_module("argparse")
-    let json = Python.import_module("json")
-    let sys = Python.import_module("sys")
-    let urllib_parse = Python.import_module("urllib.parse")
-    let urllib_request = Python.import_module("urllib.request")
-    let urllib_error = Python.import_module("urllib.error")
+    let (token, user) = parse_cli_args()
+    if token == "" or user == "":
+        print(
+            "Usage: pushover-mcp --token YOUR_TOKEN --user YOUR_USER",
+            file=stderr,
+            flush=True,
+        )
+        return
 
-    let parser = argparse.ArgumentParser(
-        description="MCP for Pushover.net notifications (Mojo)"
-    )
-    parser.add_argument("--token", required=True, help="Pushover application token")
-    parser.add_argument("--user", required=True, help="Pushover user key")
-    let args = parser.parse_args()
+    if run("command -v jq 2>/dev/null").strip() == "":
+        print("jq is required at runtime", file=stderr, flush=True)
+        return
+    if run("command -v curl 2>/dev/null").strip() == "":
+        print("curl is required at runtime", file=stderr, flush=True)
+        return
 
-    let token = args.token
-    let user = args.user
-
-    let tool_schema = {
-        "name": "send",
-        "description": "Send a notification via Pushover",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "message": {"type": "string", "minLength": 1},
-                "title": {"type": "string"},
-                "priority": {"type": "number", "minimum": -2, "maximum": 2},
-                "sound": {"type": "string"},
-                "url": {"type": "string", "format": "uri"},
-                "url_title": {"type": "string"},
-                "device": {"type": "string"},
-            },
-            "required": ["message"],
-            "additionalProperties": False,
-        },
-    }
+    let tool_schema_json = "{\"name\":\"send\",\"description\":\"Send a notification via Pushover\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"message\":{\"type\":\"string\",\"minLength\":1},\"title\":{\"type\":\"string\"},\"priority\":{\"type\":\"number\",\"minimum\":-2,\"maximum\":2},\"sound\":{\"type\":\"string\"},\"url\":{\"type\":\"string\",\"format\":\"uri\"},\"url_title\":{\"type\":\"string\"},\"device\":{\"type\":\"string\"}},\"required\":[\"message\"],\"additionalProperties\":false}}"
 
     while True:
-        let line = sys.stdin.readline()
-        if line == "":
+        var line = ""
+        try:
+            line = input()
+        except Exception:
             break
 
         let stripped = line.strip()
         if stripped == "":
             continue
 
-        try:
-            let request = json.loads(stripped)
-        except Exception as parse_error:
-            send_error(
-                json,
-                sys,
-                None,
-                -32700,
-                "Parse error",
-                str(parse_error),
-            )
+        let request_json = run_jq_compact(stripped, ".")
+        if request_json == "":
+            send_error("null", -32700, "Parse error", "Invalid JSON input")
             continue
 
-        let method = request.get("method")
-        let request_id = request.get("id")
-        let params = request.get("params", {})
+        let method = run_jq_raw(request_json, ".method // empty")
+        let request_id_json = run_jq_compact(request_json, ".id // null")
+        let params_json = run_jq_compact(request_json, ".params // {}")
 
         if method == "initialize":
             send_response(
-                json,
-                sys,
-                request_id,
-                {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {
-                        "tools": {},
-                    },
-                    "serverInfo": {
-                        "name": "pushover",
-                        "version": "1.0.0",
-                    },
-                },
+                request_id_json,
+                "{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"pushover\",\"version\":\"1.0.0\"}}",
             )
             continue
 
@@ -111,158 +140,83 @@ fn main() raises:
             continue
 
         if method == "tools/list":
-            send_response(
-                json,
-                sys,
-                request_id,
-                {
-                    "tools": [tool_schema],
-                },
-            )
+            send_response(request_id_json, "{\"tools\":[" + tool_schema_json + "]}")
             continue
 
         if method == "tools/call":
-            let name = params.get("name")
-            let arguments = params.get("arguments", {})
+            let name = run_jq_raw(params_json, ".name // empty")
+            let arguments_json = run_jq_compact(params_json, ".arguments // {}")
 
             if name != "send":
                 send_error(
-                    json,
-                    sys,
-                    request_id,
+                    request_id_json,
                     -32602,
                     "Invalid params",
-                    "Unknown tool: " + str(name),
+                    "Unknown tool: " + name,
                 )
                 continue
 
-            let message_value = arguments.get("message")
-            if message_value is None:
-                send_error(
-                    json,
-                    sys,
-                    request_id,
-                    -32602,
-                    "Invalid params",
-                    "message is required",
-                )
-                continue
-            let message = str(message_value).strip()
+            let message = run_jq_raw(arguments_json, ".message // empty").strip()
             if message == "":
                 send_error(
-                    json,
-                    sys,
-                    request_id,
+                    request_id_json,
                     -32602,
                     "Invalid params",
-                    "message cannot be empty",
+                    "message is required and cannot be empty",
                 )
                 continue
 
-            let priority = None
-            let priority_input = arguments.get("priority")
-            if priority_input is not None:
-                try:
-                    priority = int(priority_input)
-                except Exception:
+            var priority = ""
+            let priority_json = run_jq_compact(arguments_json, ".priority // null")
+            if priority_json != "null":
+                priority = run_jq_raw(arguments_json, ".priority|tostring")
+                let valid_priority = run_jq_raw(
+                    arguments_json,
+                    "(.priority|type == \"number\") and (.priority >= -2) and (.priority <= 2)",
+                )
+                if valid_priority != "true":
                     send_error(
-                        json,
-                        sys,
-                        request_id,
+                        request_id_json,
                         -32602,
                         "Invalid params",
                         "priority must be a number between -2 and 2",
                     )
                     continue
 
-            if priority is not None:
-                if priority < -2 or priority > 2:
-                    send_error(
-                        json,
-                        sys,
-                        request_id,
-                        -32602,
-                        "Invalid params",
-                        "priority must be between -2 and 2",
-                    )
-                    continue
-
-            let payload = {
-                "token": token,
-                "user": user,
-                "message": message,
-            }
+            var curl_cmd = (
+                "curl -sS -X POST https://api.pushover.net/1/messages.json"
+                + " --data-urlencode "
+                + shell_quote("token=" + token)
+                + " --data-urlencode "
+                + shell_quote("user=" + user)
+                + " --data-urlencode "
+                + shell_quote("message=" + message)
+            )
 
             for field_name in ["title", "sound", "url", "url_title", "device"]:
-                let value = arguments.get(field_name)
-                if value is not None:
-                    payload[field_name] = str(value)
-            if priority is not None:
-                payload["priority"] = priority
+                let value = run_jq_raw(arguments_json, "." + field_name + " // empty")
+                if value != "":
+                    curl_cmd += " --data-urlencode " + shell_quote(field_name + "=" + value)
 
-            let encoded = urllib_parse.urlencode(payload).encode("utf-8")
-            let http_request = urllib_request.Request(
-                "https://api.pushover.net/1/messages.json",
-                data=encoded,
-                method="POST",
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
-            )
+            if priority != "":
+                curl_cmd += " --data-urlencode " + shell_quote("priority=" + priority)
 
-            try:
-                let response = urllib_request.urlopen(http_request)
-                let response_body = response.read().decode("utf-8")
-                let response_json = json.loads(response_body)
-                if response_json.get("status") != 1:
-                    send_error(
-                        json,
-                        sys,
-                        request_id,
-                        -32000,
-                        "Pushover API error",
-                        response_body,
-                    )
-                    continue
-                send_response(
-                    json,
-                    sys,
-                    request_id,
-                    {
-                        "content": [
-                            {"type": "text", "text": "Notification sent successfully"}
-                        ]
-                    },
-                )
-            except urllib_error.HTTPError as http_error:
-                let body = ""
-                try:
-                    body = http_error.read().decode("utf-8")
-                except Exception:
-                    body = str(http_error)
+            let response_body = run(curl_cmd).strip()
+            let status = run_jq_raw(response_body, ".status // empty")
+            if status != "1":
                 send_error(
-                    json,
-                    sys,
-                    request_id,
+                    request_id_json,
                     -32000,
                     "Pushover API error",
-                    body,
+                    response_body,
                 )
-            except Exception as request_error:
-                send_error(
-                    json,
-                    sys,
-                    request_id,
-                    -32000,
-                    "Failed to send notification",
-                    str(request_error),
-                )
+                continue
+
+            send_response(
+                request_id_json,
+                "{\"content\":[{\"type\":\"text\",\"text\":\"Notification sent successfully\"}]}",
+            )
             continue
 
-        if request_id is not None:
-            send_error(
-                json,
-                sys,
-                request_id,
-                -32601,
-                "Method not found",
-                method,
-            )
+        if request_id_json != "null":
+            send_error(request_id_json, -32601, "Method not found", method)
