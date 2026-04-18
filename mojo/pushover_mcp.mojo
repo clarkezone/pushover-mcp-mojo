@@ -1,4 +1,6 @@
 from std.io import input, print
+from std.collections import List
+from std.os import remove
 from std.subprocess import run
 from std.sys import argv, stderr
 
@@ -7,26 +9,93 @@ fn shell_quote(value: String) -> String:
     return "'" + value.replace("'", "'\"'\"'") + "'"
 
 
-fn run_jq_raw(input_json: String, filter: String) raises -> String:
-    let cmd = (
-        "printf %s "
-        + shell_quote(input_json)
-        + " | jq -r "
-        + shell_quote(filter)
-        + " 2>/dev/null"
+fn json_escape(value: String) -> String:
+    return (
+        value.replace("\\", "\\\\")
+        .replace("\"", "\\\"")
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
     )
-    return run(cmd).strip()
+
+
+fn write_text_file(path: String, content: String) raises:
+    with open(path, "w") as file:
+        file.write(content)
+
+
+fn read_text_file(path: String) raises -> String:
+    with open(path, "r") as file:
+        return file.read().strip()
+
+
+fn remove_quiet(path: String):
+    if path == "":
+        return
+    try:
+        remove(path)
+    except:
+        pass
+
+
+fn require_runtime_command(command_name: String) raises -> Bool:
+    return run("command -v " + shell_quote(command_name) + " 2>/dev/null").strip() != ""
+
+
+fn run_jq_raw(input_json: String, filter: String) raises -> String:
+    var in_file = ""
+    var out_file = ""
+    var result = ""
+    try:
+        in_file = run("mktemp").strip()
+        out_file = run("mktemp").strip()
+        write_text_file(in_file, input_json)
+        let cmd = (
+            "jq -r "
+            + shell_quote(filter)
+            + " "
+            + shell_quote(in_file)
+            + " > "
+            + shell_quote(out_file)
+            + " 2>/dev/null"
+        )
+        _ = run(cmd)
+        result = read_text_file(out_file)
+    except:
+        remove_quiet(in_file)
+        remove_quiet(out_file)
+        raise
+    remove_quiet(in_file)
+    remove_quiet(out_file)
+    return result
 
 
 fn run_jq_compact(input_json: String, filter: String) raises -> String:
-    let cmd = (
-        "printf %s "
-        + shell_quote(input_json)
-        + " | jq -c "
-        + shell_quote(filter)
-        + " 2>/dev/null"
-    )
-    return run(cmd).strip()
+    var in_file = ""
+    var out_file = ""
+    var result = ""
+    try:
+        in_file = run("mktemp").strip()
+        out_file = run("mktemp").strip()
+        write_text_file(in_file, input_json)
+        let cmd = (
+            "jq -c "
+            + shell_quote(filter)
+            + " "
+            + shell_quote(in_file)
+            + " > "
+            + shell_quote(out_file)
+            + " 2>/dev/null"
+        )
+        _ = run(cmd)
+        result = read_text_file(out_file)
+    except:
+        remove_quiet(in_file)
+        remove_quiet(out_file)
+        raise
+    remove_quiet(in_file)
+    remove_quiet(out_file)
+    return result
 
 
 fn emit_json(payload: String):
@@ -34,14 +103,13 @@ fn emit_json(payload: String):
 
 
 fn send_response(request_id_json: String, result_json: String) raises:
-    let cmd = (
-        "jq -cn --argjson id "
-        + shell_quote(request_id_json)
-        + " --argjson result "
-        + shell_quote(result_json)
-        + " '{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":$result}'"
+    emit_json(
+        "{\"jsonrpc\":\"2.0\",\"id\":"
+        + request_id_json
+        + ",\"result\":"
+        + result_json
+        + "}"
     )
-    emit_json(run(cmd).strip())
 
 
 fn send_error(
@@ -50,23 +118,19 @@ fn send_error(
     message: String,
     data: String = "",
 ) raises:
-    var cmd = (
-        "jq -cn --argjson id "
-        + shell_quote(request_id_json)
-        + " --arg code "
-        + shell_quote(String(code))
-        + " --arg message "
-        + shell_quote(message)
+    var payload = (
+        "{\"jsonrpc\":\"2.0\",\"id\":"
+        + request_id_json
+        + ",\"error\":{\"code\":"
+        + String(code)
+        + ",\"message\":\""
+        + json_escape(message)
+        + "\""
     )
     if data != "":
-        cmd += (
-            " --arg data "
-            + shell_quote(data)
-            + " '{\"jsonrpc\":\"2.0\",\"id\":$id,\"error\":{\"code\":($code|tonumber),\"message\":$message,\"data\":$data}}'"
-        )
-    else:
-        cmd += " '{\"jsonrpc\":\"2.0\",\"id\":$id,\"error\":{\"code\":($code|tonumber),\"message\":$message}}'"
-    emit_json(run(cmd).strip())
+        payload += ",\"data\":\"" + json_escape(data) + "\""
+    payload += "}}"
+    emit_json(payload)
 
 
 fn parse_cli_args() -> (String, String):
@@ -100,10 +164,10 @@ fn main() raises:
         )
         return
 
-    if run("command -v jq 2>/dev/null").strip() == "":
+    if not require_runtime_command("jq"):
         print("jq is required at runtime", file=stderr, flush=True)
         return
-    if run("command -v curl 2>/dev/null").strip() == "":
+    if not require_runtime_command("curl"):
         print("curl is required at runtime", file=stderr, flush=True)
         return
 
@@ -162,7 +226,7 @@ fn main() raises:
                     request_id_json,
                     -32602,
                     "Invalid params",
-                    "message is required and cannot be empty",
+                    "message cannot be empty",
                 )
                 continue
 
@@ -183,26 +247,65 @@ fn main() raises:
                     )
                     continue
 
+            var temp_files = List[String]()
+            let token_file = run("mktemp").strip()
+            temp_files.append(token_file)
+            write_text_file(token_file, token)
+            let user_file = run("mktemp").strip()
+            temp_files.append(user_file)
+            write_text_file(user_file, user)
+            let message_file = run("mktemp").strip()
+            temp_files.append(message_file)
+            write_text_file(message_file, message)
+
             var curl_cmd = (
                 "curl -sS -X POST https://api.pushover.net/1/messages.json"
                 + " --data-urlencode "
-                + shell_quote("token=" + token)
+                + shell_quote("token@" + token_file)
                 + " --data-urlencode "
-                + shell_quote("user=" + user)
+                + shell_quote("user@" + user_file)
                 + " --data-urlencode "
-                + shell_quote("message=" + message)
+                + shell_quote("message@" + message_file)
             )
 
             for field_name in ["title", "sound", "url", "url_title", "device"]:
                 let value = run_jq_raw(arguments_json, "." + field_name + " // empty")
                 if value != "":
-                    curl_cmd += " --data-urlencode " + shell_quote(field_name + "=" + value)
+                    let value_file = run("mktemp").strip()
+                    temp_files.append(value_file)
+                    write_text_file(value_file, value)
+                    curl_cmd += (
+                        " --data-urlencode "
+                        + shell_quote(field_name + "@" + value_file)
+                    )
 
             if priority != "":
-                curl_cmd += " --data-urlencode " + shell_quote("priority=" + priority)
+                let priority_file = run("mktemp").strip()
+                temp_files.append(priority_file)
+                write_text_file(priority_file, priority)
+                curl_cmd += (
+                    " --data-urlencode "
+                    + shell_quote("priority@" + priority_file)
+                )
 
-            let response_body = run(curl_cmd).strip()
-            let status = run_jq_raw(response_body, ".status // empty")
+            var response_body = ""
+            var status = ""
+            try:
+                response_body = run(curl_cmd).strip()
+                status = run_jq_raw(response_body, ".status // empty")
+            except:
+                for path in temp_files:
+                    remove_quiet(path)
+                send_error(
+                    request_id_json,
+                    -32000,
+                    "Failed to send notification",
+                    "curl/jq execution failed",
+                )
+                continue
+            for path in temp_files:
+                remove_quiet(path)
+
             if status != "1":
                 send_error(
                     request_id_json,
